@@ -1,22 +1,21 @@
-﻿using Parquet;
-using Parquet.Serialization;
+﻿using Parquet.Serialization;
 using Microsoft.Data.Sqlite;
 using ShellProgressBar;
-using System.Data;
 
 class Program
 {
     static async Task Main()
     {
+        Console.Clear();
         Console.WriteLine("=== Parquet to SQLite Converter ===");
         
-        // Get input file path from user
-        Console.WriteLine("Enter Parquet file path:");
-        string filePath = Console.ReadLine()?.Trim('"').Trim() ?? "";
+        // Get input folder path from user
+        Console.WriteLine("Enter folder path containing Parquet files:");
+        string folderPath = Console.ReadLine()?.Trim('"').Trim() ?? "";
         
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+        if (string.IsNullOrEmpty(folderPath) || !Directory.Exists(folderPath))
         {
-            Console.WriteLine("❌ File not found or invalid path!");
+            Console.WriteLine("❌ Folder not found or invalid path!");
             return;
         }
 
@@ -25,8 +24,8 @@ class Program
 
         try
         {
-            await ProcessParquetFile(filePath, sqlitePath);
-            Console.WriteLine("\n✅ Conversion completed successfully!");
+            await ProcessParquetFolder(folderPath, sqlitePath);
+            Console.WriteLine("\n✅ All files processed successfully!");
         }
         catch (Exception ex)
         {
@@ -37,59 +36,73 @@ class Program
         Console.ReadKey();
     }
 
-    static async Task ProcessParquetFile(string parquetPath, string sqlitePath)
+    static async Task ProcessParquetFolder(string folderPath, string sqlitePath)
     {
+        // Get all parquet files in the folder
+        var parquetFiles = Directory.GetFiles(folderPath, "*.parquet");
+        
+        if (parquetFiles.Length == 0)
+        {
+            Console.WriteLine("❌ No .parquet files found in the specified folder!");
+            return;
+        }
+
+        Console.WriteLine($"\n📁 Found {parquetFiles.Length} parquet files in folder");
+
+        // Initialize SQLite database
+        await InitializeDatabase(sqlitePath);
+
+        // Process each file with overall progress
+        using var mainProgressBar = new ProgressBar(parquetFiles.Length, "Processing files", new ProgressBarOptions
+        {
+            ForegroundColor = ConsoleColor.Cyan,
+            BackgroundColor = ConsoleColor.DarkGray,
+            ProgressCharacter = '─',
+            ShowEstimatedDuration = true
+        });
+
+        int totalRowsProcessed = 0;
+        int filesProcessed = 0;
+
+        foreach (var filePath in parquetFiles)
+        {
+            try
+            {
+                mainProgressBar.Tick(filesProcessed, $"Processing: {Path.GetFileName(filePath)}");
+                
+                
+                var rowsProcessed = await ProcessSingleParquetFile(filePath, sqlitePath);
+                totalRowsProcessed += rowsProcessed;
+                filesProcessed++;
+                
+                mainProgressBar.Tick(filesProcessed, $"✅ {Path.GetFileName(filePath)}: {rowsProcessed} rows");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n❌ Failed to process {Path.GetFileName(filePath)}: {ex.Message}");
+                filesProcessed++;
+                mainProgressBar.Tick(filesProcessed, $"❌ {Path.GetFileName(filePath)}: Failed");
+            }
+        }
+
+        Console.WriteLine($"\n📊 Final Summary: {totalRowsProcessed} total rows from {filesProcessed} files");
+    }
+
+    static async Task<int> ProcessSingleParquetFile(string filePath, string sqlitePath)
+    {
+        Console.WriteLine($"\n📖 Reading: {Path.GetFileName(filePath)}");
+        
         // Read Parquet file
-        Console.WriteLine($"\n📖 Reading Parquet file: {Path.GetFileName(parquetPath)}");
-        var data = await ReadParquetWithProgress(parquetPath);
+        var data = await ReadParquetWithProgress(filePath);
         
         // Save to SQLite
-        Console.WriteLine($"\n💾 Saving to SQLite: {sqlitePath}");
-        await SaveToSqliteWithProgress(data, sqlitePath);
+        var rowsInserted = await SaveToSqliteWithProgress(data, sqlitePath, Path.GetFileName(filePath));
+        
+        return rowsInserted;
     }
 
-    static async Task<IList<ParquetData>> ReadParquetWithProgress(string filePath)
+    static async Task InitializeDatabase(string sqlitePath)
     {
-        using var progressBar = new ProgressBar(100, "Reading Parquet file", new ProgressBarOptions
-        {
-            ForegroundColor = ConsoleColor.Green,
-            BackgroundColor = ConsoleColor.DarkGray,
-            ProgressCharacter = '─',
-            ShowEstimatedDuration = true
-        });
-
-        try
-        {
-            // Simulate progress for reading (since we can't get actual progress from DeserializeAsync)
-            for (int i = 0; i <= 100; i += 10)
-            {
-                await Task.Delay(50);
-                progressBar.Tick(i, $"Reading file... {i}%");
-            }
-
-            var fileStream = File.OpenRead(filePath);
-            var data = await ParquetSerializer.DeserializeAsync<ParquetData>(fileStream);
-            
-            progressBar.Tick(100, $"✅ Read {data.Count} rows");
-            return data;
-        }
-        catch (Exception ex)
-        {
-            progressBar.Tick(100, "❌ Error reading file");
-            throw new Exception($"Failed to read Parquet file: {ex.Message}", ex);
-        }
-    }
-
-    static async Task SaveToSqliteWithProgress(IList<ParquetData> data, string sqlitePath)
-    {
-        using var progressBar = new ProgressBar(data.Count, "Saving to SQLite", new ProgressBarOptions
-        {
-            ForegroundColor = ConsoleColor.Blue,
-            BackgroundColor = ConsoleColor.DarkGray,
-            ProgressCharacter = '─',
-            ShowEstimatedDuration = true
-        });
-
         using var connection = new SqliteConnection($"Data Source={sqlitePath}");
         await connection.OpenAsync();
 
@@ -106,23 +119,47 @@ class Program
                 iso_639_3 TEXT,
                 glottocode TEXT,
                 iso_15924 TEXT,
+                source_file TEXT,
                 created_date DATETIME DEFAULT CURRENT_TIMESTAMP
             )";
 
         using var createTableCommand = new SqliteCommand(createTableSql, connection);
         await createTableCommand.ExecuteNonQueryAsync();
+    }
+
+    static async Task<IList<ParquetData>> ReadParquetWithProgress(string filePath)
+    {
+        try
+        {
+            using var fileStream = File.OpenRead(filePath);
+            var data = await ParquetSerializer.DeserializeAsync<ParquetData>(fileStream);
+            return data;
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Failed to read {Path.GetFileName(filePath)}: {ex.Message}", ex);
+        }
+    }
+
+    static async Task<int> SaveToSqliteWithProgress(IList<ParquetData> data, string sqlitePath, string fileName)
+    {
+        if (data.Count == 0)
+            return 0;
+
+        using var connection = new SqliteConnection($"Data Source={sqlitePath}");
+        await connection.OpenAsync();
 
         // Use transaction for better performance
         using var transaction = await connection.BeginTransactionAsync();
         
         var insertSql = @"
             INSERT INTO parquet_data 
-            (language, speaker_id, prompt_id, prompt, segment_id, raw_text, iso_639_3, glottocode, iso_15924)
+            (language, speaker_id, prompt_id, prompt, segment_id, raw_text, iso_639_3, glottocode, iso_15924, source_file)
             VALUES 
-            (@language, @speaker_id, @prompt_id, @prompt, @segment_id, @raw_text, @iso_639_3, @glottocode, @iso_15924)";
+            (@language, @speaker_id, @prompt_id, @prompt, @segment_id, @raw_text, @iso_639_3, @glottocode, @iso_15924, @source_file)";
 
         using var insertCommand = new SqliteCommand(insertSql, connection);
-        insertCommand.Transaction = (SqliteTransaction) transaction;
+        insertCommand.Transaction = (SqliteTransaction)transaction;
         
         // Add parameters
         insertCommand.Parameters.AddRange(new[]
@@ -135,18 +172,18 @@ class Program
             new SqliteParameter("@raw_text", SqliteType.Text),
             new SqliteParameter("@iso_639_3", SqliteType.Text),
             new SqliteParameter("@glottocode", SqliteType.Text),
-            new SqliteParameter("@iso_15924", SqliteType.Text)
+            new SqliteParameter("@iso_15924", SqliteType.Text),
+            new SqliteParameter("@source_file", SqliteType.Text)
         });
 
         int successCount = 0;
         int errorCount = 0;
-        int i = 0;
 
-        foreach(ParquetData row in data)
+        for (int i = 0; i < data.Count; i++)
         {
             try
             {
-
+                var row = data[i];
                 
                 // Set parameter values
                 insertCommand.Parameters["@language"].Value = row.language ?? (object)DBNull.Value;
@@ -158,23 +195,21 @@ class Program
                 insertCommand.Parameters["@iso_639_3"].Value = row.iso_639_3 ?? (object)DBNull.Value;
                 insertCommand.Parameters["@glottocode"].Value = row.glottocode ?? (object)DBNull.Value;
                 insertCommand.Parameters["@iso_15924"].Value = row.iso_159_24 ?? (object)DBNull.Value;
+                insertCommand.Parameters["@source_file"].Value = fileName;
 
                 await insertCommand.ExecuteNonQueryAsync();
                 successCount++;
-                i++;
             }
             catch (Exception ex)
             {
                 errorCount++;
-                // You might want to log this error in a real application
             }
-
-            progressBar.Tick($"Inserted: {i + 1}/{data.Count} | ✅: {successCount} | ❌: {errorCount}");
         }
 
         await transaction.CommitAsync();
         
-        Console.WriteLine($"\n📊 Summary: {successCount} successful, {errorCount} failed");
+        Console.WriteLine($"📊 {fileName}: {successCount} successful, {errorCount} failed");
+        return successCount;
     }
 }
 
