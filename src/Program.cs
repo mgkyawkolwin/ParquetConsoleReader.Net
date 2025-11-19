@@ -4,6 +4,7 @@ using ShellProgressBar;
 
 class Program
 {
+    static readonly IList<string> failedFiles = [];
     static async Task Main()
     {
         Console.Clear();
@@ -25,13 +26,17 @@ class Program
         try
         {
             await ProcessParquetFolder(folderPath, sqlitePath);
-            Console.WriteLine("\n✅ All files processed successfully!");
+            Console.WriteLine("\n✅ All files have been processed!");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"\n❌ Error: {ex.Message}");
         }
-
+        if(failedFiles.Count > 0)
+        {
+            Console.WriteLine("Following files were failed to process partially or completely.");
+            Console.WriteLine(" - " + string.Join("\n - ", failedFiles));
+        }
         Console.WriteLine("\nPress any key to exit...");
         Console.ReadKey();
     }
@@ -203,6 +208,10 @@ class Program
             catch (Exception ex)
             {
                 errorCount++;
+                if (!failedFiles.Contains(fileName))
+                {
+                    failedFiles.Add(fileName);
+                }
                 Console.WriteLine(ex.Message);
             }
         }
