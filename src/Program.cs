@@ -203,6 +203,7 @@ class Program
             catch (Exception ex)
             {
                 errorCount++;
+                Console.WriteLine(ex.Message);
             }
         }
 
